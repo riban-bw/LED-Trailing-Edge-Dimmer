@@ -11,7 +11,7 @@
 #include <WiFiManager.h>          //https://github.com/tzapu/WiFiManager
 #include <ESP8266mDNS.h>
 #include <Wire.h>
-#include "fauxmoESP.h" // Provides alexa interface
+#include "fauxmoESP.h" // Provides alexa interface https://bitbucket.org/xoseperez/fauxmoesp/src/master
 
 fauxmoESP fauxmo; // Create an instance of the alexa interface
 ESP8266WebServer webserver(8000); // Create an instance of a web server
@@ -20,15 +20,28 @@ ESP8266HTTPUpdateServer httpUpdater;
 #define SERIAL_BAUDRATE   115200 // Debug serial port baudrate
 #define LAMP_QUANT        2 // Quantity of lamps configured
 
-// GPI pins
-#define SCL_PIN         D1 // GPI pin for I2C clock
-#define SDA_PIN         D2 // GPI pin for I2C data
-#define ENCODER1_BUTTON D5 // GPIO 14
-#define ENCODER1_CLK    D4 // GPIO 2
-#define ENCODER1_DATA   D3 // GPIO 0
-#define ENCODER2_BUTTON D6 // GPIO 12
-#define ENCODER2_CLK    D7 // GPIO 13
-#define ENCODER2_DATA   D0 // GPIO 16
+/* GPI pins
+ *  WEMOS | ESP8266 | Notes
+ *    D0  | GPIO 16 | Hardware 10K pulldown (Boot mode selection)
+ *    D1  | GPIO 5  | I2C Clock
+ *    D2  | GPIO 4  | I2C Data
+ *    D3  | GPIO 0  | Hardware 10K pullup
+ *    D4  | GPIO 2  | LED Hardware 10K pullup (Boot mode selection)
+ *    D5  | GPIO 14 | 
+ *    D6  | GPIO 12 |
+ *    D7  | GPIO 13 |
+ *    D8  | GPIO 15 | Hardware 10K pulldown
+ *    TX  | GPIO 1  | Serial Tx
+ *    RX  | GPIO 3  | Serial Rx
+ */
+#define SCL_PIN         D1
+#define SDA_PIN         D2
+#define ENCODER1_BUTTON D8
+#define ENCODER1_CLK    D7
+#define ENCODER1_DATA   D6
+#define ENCODER2_BUTTON D0
+#define ENCODER2_CLK    D3
+#define ENCODER2_DATA   D5
 
 const int16_t I2C_MASTER = 0x42; // I2C Master address (this device)
 const int16_t I2C_SLAVE = 0x08; // I2C Slave address (lamp controller device)
@@ -40,7 +53,7 @@ char g_hostname[23];
 // Structure describing a lamp controller
 struct LAMP {
   bool state = false; // True when lamp on
-  bool switchState = true; // False when button pressed
+  bool switchState = false; // True when button pressed
   byte minValue = 20; // Minimum dim level
   byte maxValue = 255; // Maximum dim level
   byte step = 15; // Value change for each encoder detent
@@ -50,13 +63,13 @@ struct LAMP {
   unsigned int encoderDataPin; // Index of GPI pin connectd to encoder data
   uint8_t nCount; // Used to filter encoder
   uint8_t nCode; // Used to filter encoder
-  const char* name; // Name of lamp, e.g. "kitchen lights"
+  const char* name; // Name of lamp
   // Function to initialise encoder
   void init(unsigned int nSwitch, unsigned int nClk, unsigned int nData) {
     switchPin = nSwitch;
     encoderClkPin = nClk;
     encoderDataPin = nData;
-    pinMode(switchPin, INPUT_PULLUP);
+    pinMode(switchPin, INPUT_PULLDOWN_16); //!@todo Check this will work for all inputs pins
     pinMode(encoderClkPin, INPUT_PULLUP);
     pinMode(encoderDataPin, INPUT_PULLUP);
     // Set limits to trigger calculation of step
@@ -110,7 +123,7 @@ struct LAMP {
       nCount |= nCode;
       if(nCount == 0xd4 && value < 255) {
         // CW
-        return setValue(value + step); //!@todo Handle fast rotation
+        return setValue(value + step);
       }
       else if(nCount == 0x17 && value > 0) {
         // CCW
@@ -139,7 +152,6 @@ LAMP g_lamps[LAMP_QUANT]; // Create instances of lamp controllers
 
 // HTTP handler for root
 void handleWebHome() {
-  Serial.println("HTTP request for home page");
   String sHtml = "<!DOCTYPE html><html lang='en'>\
     <head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'/></head>\
     <body><div { background: #006368; }><h1>riban control light dimmer switch</h1><form method='POST'>";
@@ -170,8 +182,6 @@ void handleWebHomePost() {
 
 // HTTP handler for root
 void handleWebUpdate() {
-  //!@todo Implement HTTP handler
-  Serial.println("HTTP request for firmware update page");
   webserver.send(200, "text/html", "<!DOCTYPE html><html lang='en'> \
     <head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'/></head> \
     <body><h1>riban control light dimmer switch</h1> \
@@ -200,13 +210,15 @@ void setup() {
     // Init serial port and clean garbage
     Serial.begin(SERIAL_BAUDRATE);
     Serial.println();
-    Serial.println("riban light switch v0.1 starting...");
+    Serial.println("riban light switch v0.2 starting...");
 
     // Initialise lamps
     g_lamps[0].init(ENCODER1_BUTTON, ENCODER1_CLK, ENCODER1_DATA);
-    g_lamps[0].name = "Kitchen lights";
+    g_lamps[0].name = "Lamp 1";
     g_lamps[1].init(ENCODER2_BUTTON, ENCODER2_CLK, ENCODER2_DATA);
-    g_lamps[1].name = "Dining lights";
+    g_lamps[1].name = "Lamp 2";
+
+    pinMode(LED_BUILTIN, OUTPUT);
 
     // Set hostname
     uint32_t chipid = ESP.getChipId();
@@ -214,11 +226,13 @@ void setup() {
     sprintf(g_hostname, "riban-control-%02x%02x%02x%02x", (chipid >> 24) & 0xFF, (chipid >> 16) & 0xFF, (chipid >> 8) & 0xFF, chipid & 0xFF);
 
     // If button pressed during boot, start wifiManager
-    if(!digitalRead(g_lamps[0].switchPin)) {
+    if(digitalRead(g_lamps[1].switchPin)) {
+        digitalWrite(LED_BUILTIN, LOW);
         WiFi.disconnect();
         WiFiManager wifiManager;
         wifiManager.startConfigPortal(g_hostname);
     }
+    digitalWrite(LED_BUILTIN, HIGH);
     WiFi.begin(); // Attempt to connect to last AP
     WiFi.hostname(g_hostname);
     
@@ -229,7 +243,7 @@ void setup() {
     fauxmo.createServer(true);
     fauxmo.setPort(80);
     for(unsigned int nLamp = 0; nLamp < LAMP_QUANT; ++nLamp)
-      fauxmo.addDevice(g_lamps[nLamp].name); //!@todo Set device names from web interface
+      fauxmo.addDevice(g_lamps[nLamp].name);
 
     fauxmo.onSetState([](unsigned char nId, const char * sName, bool bState, unsigned char nValue) {
         Serial.printf("Alexa command for device %d (%s) state: %s value: %d\n", nId, sName, bState ? "ON" : "OFF", nValue);
@@ -258,7 +272,7 @@ void loop() {
     if(!bStationHasConnected) {
       bStationHasConnected = WiFi.isConnected();
       if(bStationHasConnected) {
-        Serial.printf("Connected to AP %s, IP: %d.%d.%d.%d", WiFi.SSID().c_str(), WiFi.localIP()[0], WiFi.localIP()[1], WiFi.localIP()[2], WiFi.localIP()[3]);
+        Serial.printf("Connected to AP %s, IP: %d.%d.%d.%d\n", WiFi.SSID().c_str(), WiFi.localIP()[0], WiFi.localIP()[1], WiFi.localIP()[2], WiFi.localIP()[3]);
         fauxmo.enable(true);
         Serial.println("Alexa handler started");
         webserver.begin();
@@ -266,6 +280,7 @@ void loop() {
         if(MDNS.begin(g_hostname))
           Serial.printf("mDNS started: %s\n", g_hostname);
         MDNS.addService("http", "tcp", 8000);
+        Serial.printf("Web interface: http://%s.local:8000\n", g_hostname);
       }
     }
     
@@ -275,7 +290,7 @@ void loop() {
         g_nLampFlag |= 1 << nLamp;
       if(nDebounceTime == 0 && g_lamps[nLamp].readSwitch()) {
         nDebounceTime = 50;
-        if(g_lamps[nLamp].switchState) {
+        if(g_lamps[nLamp].switchState == false) {
           g_lamps[nLamp].setState(!g_lamps[nLamp].state);
           g_nLampFlag |= 1 << nLamp;
         }
